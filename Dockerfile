@@ -1,20 +1,18 @@
-# Use an official Python runtime as a parent image
 FROM python:3.10-slim
 
-# Set the working directory
 WORKDIR /app
 
-# Copy the current directory contents into the container at /app
-COPY . /app
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
-# Install any needed packages specified in requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY pyproject.toml uv.lock* ./
 
-# Make port 8000 available to the world outside this container
+RUN uv sync --frozen --no-dev
+COPY src/ ./src/
+RUN uv pip install --no-deps -e .
+COPY data/ ./data/
+COPY main.py .
+
 EXPOSE 8000
+ENV NAME=ProductSimilarityApp
 
-# Define environment variable
-ENV NAME ProductSimilarityApp
-
-# Run app.py when the container launches
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
