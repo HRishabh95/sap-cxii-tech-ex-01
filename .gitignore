@@ -1,6 +1,9 @@
-## Ignoring json and ldjson files under data
-data/*.json
-data/*.ldjson
+## project-specific
+interview.md
+.claude/
+.python-version
+data/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
