@@ -103,7 +103,7 @@ def build_text_index(df: pd.DataFrame):
     vecs = vecs.astype("float32")
     index = _hnsw_index(vecs.shape[1])
     index.add(vecs)
-    return index, vecs
+    return index, vecs, model
 
 
 def find_similar_by_text(product_id: str, num_similar: int, df: pd.DataFrame, index: faiss.Index, embeddings: np.ndarray) -> List[str]:

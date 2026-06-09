@@ -33,16 +33,24 @@ def _first_url(cell) -> Optional[str]:
     return url if url.startswith("http") else None
 
 
+_ADAPTER = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100)
+_SESSION = requests.Session()
+_SESSION.headers["User-Agent"] = "Mozilla/5.0"
+_SESSION.mount("http://", _ADAPTER)
+_SESSION.mount("https://", _ADAPTER)
+
+
 def _fetch(url: str) -> Optional[Image.Image]:
     try:
-        r = requests.get(url, timeout=6)
+        r = _SESSION.get(url, timeout=3, stream=True)
         r.raise_for_status()
-        return Image.open(BytesIO(r.content)).convert("RGB")
+        data = b"".join(r.iter_content(65536))
+        return Image.open(BytesIO(data)).convert("RGB")
     except Exception:
         return None
 
 
-def build_image_embeddings(df: pd.DataFrame, batch_size: int = 64, max_workers: int = 16, force_rebuild: bool = False):
+def build_image_embeddings(df: pd.DataFrame, batch_size: int = 128, max_workers: int = 64, force_rebuild: bool = False):
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     if not force_rebuild and EMBEDDINGS_FILE.exists() and VALID_MASK_FILE.exists():
@@ -51,26 +59,37 @@ def build_image_embeddings(df: pd.DataFrame, batch_size: int = 64, max_workers: 
     urls = df["medium"].apply(_first_url).tolist()
     images: List[Optional[Image.Image]] = [None] * len(urls)
 
+    valid_urls = [(i, url) for i, url in enumerate(urls) if url]
+    logger.info("downloading %d images with %d workers...", len(valid_urls), max_workers)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_fetch, url): i for i, url in enumerate(urls) if url}
+        futures = {pool.submit(_fetch, url): i for i, url in valid_urls}
+        done = 0
         for fut in as_completed(futures):
             images[futures[fut]] = fut.result()
+            done += 1
+            if done % 1000 == 0:
+                logger.info("  %d/%d done", done, len(valid_urls))
 
     has_image = np.array([img is not None for img in images], dtype=bool)
     valid_idx = np.where(has_image)[0]
-    logger.info("%d/%d images downloaded", has_image.sum(), len(urls))
+    logger.info("%d/%d images downloaded successfully", has_image.sum(), len(urls))
 
+    device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
     resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
     resnet.fc = torch.nn.Identity()
     resnet.eval()
+    resnet.to(device)
+    logger.info("running ResNet-18 inference on %s", device)
 
     embeddings = np.zeros((len(urls), 512), dtype="float32")
     with torch.no_grad():
         for start in range(0, len(valid_idx), batch_size):
             pos = valid_idx[start: start + batch_size]
-            tensors = torch.stack([_TRANSFORM(images[i]) for i in pos])
-            feats = resnet(tensors).numpy()
+            tensors = torch.stack([_TRANSFORM(images[i]) for i in pos]).to(device)
+            feats = resnet(tensors).cpu().numpy()
             embeddings[pos] = feats / np.linalg.norm(feats, axis=1, keepdims=True).clip(min=1e-9)
+            if start % 2000 == 0:
+                logger.info("  inference %d/%d", start, len(valid_idx))
 
     np.save(EMBEDDINGS_FILE, embeddings)
     np.save(VALID_MASK_FILE, has_image)
